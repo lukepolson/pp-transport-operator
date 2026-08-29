@@ -1,0 +1,8 @@
+numpy
+torch
+cupy-cuda12x
+matplotlib
+
+# optional
+# pytomography      # to use as a Transform inside a reconstruction
+# SimpleITK         # only for the CT-reading command line path in hu_to_mu.py
