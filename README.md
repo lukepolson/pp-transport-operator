@@ -107,4 +107,9 @@ If you use this, please cite the paper describing the operator, L A Polson and
 Y Seo, *Assessing the pair-production pathway for PET imaging of 212Pb with a
 photon transport operator* (Physics in Medicine & Biology, under review), and
 the archived release (DOI to follow). The analysis pipeline that produced the
-paper's results is in its own repository.
+paper's results is at
+[lukepolson/pp-pet-212pb](https://github.com/lukepolson/pp-pet-212pb).
+
+## License
+
+MIT; see `LICENSE`.

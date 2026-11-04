@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the paper and the archived release."
+title: "Pair-production transport operator"
+authors:
+  - family-names: Polson
+    given-names: Luke A.
+version: pmb-r1
+license: MIT
+repository-code: "https://github.com/lukepolson/pp-transport-operator"
+preferred-citation:
+  type: article
+  authors:
+    - family-names: Polson
+      given-names: Luke A.
+    - family-names: Seo
+      given-names: Youngho
+  title: "Assessing the pair-production pathway for PET imaging of 212Pb with a photon transport operator"
+  journal: "Physics in Medicine & Biology"

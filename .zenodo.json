@@ -1,0 +1,11 @@
+{
+  "title": "Pair-production transport operator",
+  "version": "pmb-r1",
+  "description": "A Monte Carlo photon transport operator that maps activity density to the density of electron-positron pairs through the patient's CT, for PET imaging of the 2.6145 MeV emission of 208Tl in the 212Pb chain, with the CT-to-coefficient conversion that feeds it. Release pmb-r1 is the version used in the revised manuscript (L A Polson and Y Seo, Physics in Medicine & Biology, under review).",
+  "creators": [
+    {"name": "Polson, Luke A."}
+  ],
+  "license": "MIT",
+  "upload_type": "software",
+  "keywords": ["PET", "pair production", "212Pb", "alpha therapy", "Monte Carlo", "image reconstruction"]
+}
