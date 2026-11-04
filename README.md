@@ -21,6 +21,13 @@ maps activity density to pair-production vertex density through the patient's
 own CT. Placed in the system matrix as `H = N A P B Gamma`, it lets listmode
 OSEM converge to the activity instead.
 
+The excited 208Pb nucleus can also create the pair itself, by internal pair
+formation, in `alpha_pi = 3.71e-4` of the transitions. Those pairs appear at the
+decay site with no photon to transport, so the operator used in the paper is
+`Gamma' = Gamma + b alpha_pi I`, set with `internal=alpha_pi`.
+
+Release `pmb-r1` is the version that produced the results of the revised paper.
+
 ## Requirements
 
 - An NVIDIA GPU. The tracker is a CUDA kernel and there is no CPU path.
@@ -44,7 +51,8 @@ from pp_vertex_mc import MCPPVertexTransform
 bins = hu_to_mu.build_bins()
 mu_tot, mu_pp = hu_to_mu.mu_maps(hu, 2.6145, bins)     # 1/mm, from your CT
 
-op = MCPPVertexTransform(mu_tot, mu_pp, b=0.358, n_photons=int(1e9), ndir=8)
+op = MCPPVertexTransform(mu_tot, mu_pp, b=0.398, n_photons=int(1e9), ndir=8,
+                         internal=3.71e-4)
 op.setup(shape, dr)                                     # dr in mm
 vertices = op.forward(activity)                         # torch tensor in, out
 ```
@@ -86,11 +94,17 @@ is enough to look at; the paper's patient reconstructions used `K` of about
 - `backward()` is the **exact transpose** of what `forward()` realised, at any
   photon count, because it gathers along the stored paths.
 - The operator is **not self-adjoint** unless `mu_pp` is constant.
+- `positron` (off by default, and off in the paper) scores the annihilation
+  point instead of the conversion vertex, from a table of positron
+  displacements.
 
 `CLAUDE.md` has the integration details, the invariants, and the checks to run
 after modifying anything.
 
 ## Citation
 
-If you use this, please cite the paper describing the operator (in
-preparation). Details will be added here on publication.
+If you use this, please cite the paper describing the operator, L A Polson and
+Y Seo, *Assessing the pair-production pathway for PET imaging of 212Pb with a
+photon transport operator* (Physics in Medicine & Biology, under review), and
+the archived release (DOI to follow). The analysis pipeline that produced the
+paper's results is in its own repository.

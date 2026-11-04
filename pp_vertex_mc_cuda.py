@@ -108,7 +108,10 @@ __global__ void woodcock_pp(
     const int nx, const int ny, const int nz,
     const float dx, const float dy, const float dz,
     const float mu_max, const long long n_groups, const int ndirs_total,
-    const int max_steps, const unsigned long long seed)
+    const int max_steps, const unsigned long long seed,
+    const float2* __restrict__ ptab,    // ntab (d_par, d_perp) in water, mm (POSITRON 1)
+    const int ntab, const float mu_ref, const float smax,
+    const float dshift)                 // mean forward drift in water, mm (POSITRON 2)
 {
     long long tid = blockIdx.x * (long long)blockDim.x + threadIdx.x;
     long long nthr = gridDim.x * (long long)blockDim.x;
@@ -164,6 +167,17 @@ __global__ void woodcock_pp(
             float sn, cs;
             __sincosf(2.39996322973f * (float)di + rot, &sn, &cs);
             float ex = sr * cs, ey = sr * sn, ez = uz;
+#if POSITRON == 1
+            // Two unit vectors perpendicular to the photon direction, for the
+            // transverse part of the positron displacement.
+            const float az = (fabsf(ez) < 0.9f) ? 1.0f : 0.0f, ax = 1.0f - az;
+            float e1x = -az * ey, e1y = az * ex - ax * ez, e1z = ax * ey;
+            const float n1 = rsqrtf(e1x * e1x + e1y * e1y + e1z * e1z);
+            e1x *= n1; e1y *= n1; e1z *= n1;
+            const float e2x = ey * e1z - ez * e1y;
+            const float e2y = ez * e1x - ex * e1z;
+            const float e2z = ex * e1y - ey * e1x;
+#endif
 
             // W is the path weight alone, so the roulette below depends only on
             // the path and the operator stays exactly linear in its input.
@@ -205,10 +219,39 @@ __global__ void woodcock_pp(
 #else
                 float sc = W * m.y * rmu;
 #endif
-#if TRANSPOSE
-                gacc += sc * yimg[vf];
+#if POSITRON == 1
+                // The positron keeps the photon's forward momentum, so it
+                // annihilates displaced along the photon direction rather than
+                // isotropically. Draw (d_par, d_perp) from the measured joint
+                // table, scale it by water over local density, and score the
+                // voxel where it annihilates.
+                const float2 dp = ptab[min((int)(urand(st) * (float)ntab), ntab - 1)];
+                const float sd = fminf(mu_ref / fmaxf(m.x, 1.0e-12f), smax);
+                float sph, cph;
+                __sincosf(6.28318530718f * urand(st), &sph, &cph);
+                const float apar = sd * dp.x, aper = sd * dp.y;
+                const float qx = px + apar * ex + aper * (cph * e1x + sph * e2x);
+                const float qy = py + apar * ey + aper * (cph * e1y + sph * e2y);
+                const float qz = pz + apar * ez + aper * (cph * e1z + sph * e2z);
+                const int vs = min(max((int)rintf(qx * rdx + cx), 0), nx - 1) * s1
+                             + min(max((int)rintf(qy * rdy + cy), 0), ny - 1) * nz
+                             + min(max((int)rintf(qz * rdz + cz0), 0), nz - 1);
+#elif POSITRON == 2
+                // Only the mean of the displacement, as a deterministic step
+                // along the photon direction (density-scaled). It adds no
+                // randomness to the matrix; the spread about the mean is left
+                // to an image-space kernel applied after this operator.
+                const float sd = fminf(mu_ref / fmaxf(m.x, 1.0e-12f), smax) * dshift;
+                const int vs = min(max((int)rintf((px + sd * ex) * rdx + cx), 0), nx - 1) * s1
+                             + min(max((int)rintf((py + sd * ey) * rdy + cy), 0), ny - 1) * nz
+                             + min(max((int)rintf((pz + sd * ez) * rdz + cz0), 0), nz - 1);
 #else
-                atomicAdd(&out[vf], we * sc);
+                const int vs = vf;
+#endif
+#if TRANSPOSE
+                gacc += sc * yimg[vs];
+#else
+                atomicAdd(&out[vs], we * sc);
 #endif
 #if RAYMARCH
                 W *= __expf(-m.x * step);
@@ -235,27 +278,35 @@ __global__ void woodcock_pp(
 _KERNELS: dict = {}
 
 
-def _kernel(ndir: int, transpose: bool, raymarch: bool):
-    key = (int(ndir), bool(transpose), bool(raymarch))
+def _kernel(ndir: int, transpose: bool, raymarch: bool, positron: int = 0):
+    key = (int(ndir), bool(transpose), bool(raymarch), int(positron))
     if key not in _KERNELS:
         import cupy as cp
         _KERNELS[key] = cp.RawKernel(
             _SRC, "woodcock_pp",
             options=("--use_fast_math", f"-DNDIR={int(ndir)}",
                      f"-DTRANSPOSE={1 if transpose else 0}",
-                     f"-DRAYMARCH={1 if raymarch else 0}"))
+                     f"-DRAYMARCH={1 if raymarch else 0}",
+                     f"-DPOSITRON={int(positron)}"))
     return _KERNELS[key]
 
 
 def woodcock_track(w0, mu2, shape, dr, mu_max, n_groups, ndir, transpose,
                    seed, ndirs_total=None, yimg=None, max_steps=64,
-                   raymarch=False,
+                   raymarch=False, ptab=None, mu_ref=0.0, smax=1.0, dshift=0.0,
                    threads=128, blocks=8192):
     """Run the kernel and return the accumulated score image as a torch tensor.
 
     All array arguments are contiguous CUDA torch tensors; the output is a torch
     tensor on the same device. cupy and torch share the allocation through
     __cuda_array_interface__, so nothing is copied to the host.
+
+    ptab, an (n, 2) table of positron displacements (along, across the photon
+    direction, mm, in water), moves each score to where the positron
+    annihilates; mu_ref is mu_tot of water, and smax caps the density scaling.
+    Forward and transpose draw the same displacements, so the transpose stays
+    exact. Without a table, a non-zero dshift moves each score by that mean
+    forward drift instead, deterministically.
     """
     import cupy as cp
     import torch
@@ -271,7 +322,11 @@ def woodcock_track(w0, mu2, shape, dr, mu_max, n_groups, ndir, transpose,
             np.float32(dr[0]), np.float32(dr[1]), np.float32(dr[2]),
             np.float32(mu_max), np.int64(n_groups),
             np.int32(ndirs_total if ndirs_total else ndir),
-            np.int32(max_steps), np.uint64(seed))
-    _kernel(ndir, transpose, raymarch)((blocks,), (threads,), args)
+            np.int32(max_steps), np.uint64(seed),
+            cp.asarray(ptab.reshape(-1)) if ptab is not None else nul,
+            np.int32(0 if ptab is None else ptab.shape[0]),
+            np.float32(mu_ref), np.float32(smax), np.float32(dshift))
+    mode = 1 if ptab is not None else (2 if dshift else 0)
+    _kernel(ndir, transpose, raymarch, mode)((blocks,), (threads,), args)
     cp.cuda.runtime.deviceSynchronize()
     return out.reshape(nx, ny, nz)

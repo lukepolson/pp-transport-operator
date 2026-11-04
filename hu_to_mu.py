@@ -39,6 +39,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import SimpleITK as sitk
 
 # --- Element data: Z, standard atomic mass ---------------------------------
 ELEMENTS = {
@@ -50,7 +51,9 @@ ELEMENTS = {
 
 # --- Tissue classes: ICRP/ICRU elemental mass fractions ---------------------
 # Compositions match the G4_*_ICRP NIST definitions so that the GATE database
-# we emit is consistent with Geant4's own materials.
+# we emit is consistent with Geant4's own materials, except ADIPOSE, which is
+# ICRU Report 44 adipose tissue and has no Geant4 NIST equivalent.  The GATE
+# database is written from "comp" (write_gate_material_db); "g4" is a label.
 TISSUES = {
     "AIR": dict(
         g4="G4_AIR", rho_nominal=1.205e-3,
@@ -61,15 +64,14 @@ TISSUES = {
               "Na": 0.00184, "Mg": 0.00073, "P": 0.0008, "S": 0.00225,
               "Cl": 0.00266, "K": 0.00194, "Ca": 0.00009, "Fe": 0.00037,
               "Zn": 0.00001}),
-    # MISLABELLED: these mass fractions are ICRU Report 44 adipose tissue, not
-    # ICRP.  NIST/ICRP (and therefore Geant4's G4_ADIPOSE_TISSUE_ICRP, and
-    # SIMIND's adipose_icrp.cr4) is H 11.948 C 63.724 N 0.797 O 23.233.  The
-    # two differ by -0.35% in mu_tot and +1.95% in mu_pp, which is the entire
-    # adipose discrepancy reported in context/CROSS_SECTIONS.md.  Left as-is so
-    # that existing runs stay reproducible; switch it deliberately, together
-    # with the GATE database it feeds, or relabel it honestly as ICRU-44.
+    # ICRU Report 44 adipose tissue, labelled as such here and in Table 1 of the
+    # paper.  It is not the NIST/ICRP composition of Geant4's
+    # G4_ADIPOSE_TISSUE_ICRP (or SIMIND's adipose_icrp.cr4), H 11.948 C 63.724
+    # N 0.797 O 23.233; the two differ by -0.35% in mu_tot and +1.95% in mu_pp,
+    # the entire adipose discrepancy in context/CROSS_SECTIONS.md.  Every run
+    # used these fractions, so they stay.
     "ADIPOSE": dict(
-        g4="G4_ADIPOSE_TISSUE_ICRP", rho_nominal=0.95,
+        g4="ICRU44_ADIPOSE", rho_nominal=0.95,
         comp={"H": 0.114, "C": 0.598, "N": 0.007, "O": 0.278,
               "Na": 0.001, "S": 0.001, "Cl": 0.001}),
     "SOFT": dict(
@@ -250,7 +252,6 @@ def voxel_materials(bins):
 
 
 def process(patient_dir, energy_mev, density_tolerance, out_name=None):
-    import SimpleITK as sitk        # only the CLI path needs it
     patient_dir = Path(patient_dir)
     nifti = patient_dir / "nifti"
     ct = sitk.ReadImage(str(nifti / "ct.nii.gz"))
@@ -294,7 +295,7 @@ def main():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--root", default=r"C:\Users\lukep\Documents\Ga68-TCIA")
     p.add_argument("--patient", default=None, help="Default: all in --root")
-    p.add_argument("--energy", type=float, default=2.6, help="Photon energy, MeV")
+    p.add_argument("--energy", type=float, default=2.6145, help="Photon energy, MeV")
     p.add_argument("--density-tolerance", type=float, default=0.05,
                    help="Max density width per generated material, g/cm3")
     args = p.parse_args()

@@ -63,7 +63,8 @@ from pp_vertex_mc import MCPPVertexTransform
 bins = hu_to_mu.build_bins()
 mu_tot, mu_pp = hu_to_mu.mu_maps(hu, 2.6145, bins)      # 1/mm, from CT
 
-op = MCPPVertexTransform(mu_tot, mu_pp, b=0.358, n_photons=int(1e11), ndir=8)
+op = MCPPVertexTransform(mu_tot, mu_pp, b=0.398, n_photons=int(1e11), ndir=8,
+                         internal=3.71e-4)    # Gamma' = Gamma + b alpha_pi I
 op.setup(shape, dr)          # or op.configure(object_meta) under PyTomography
 vertices = op.forward(activity_tensor)
 ```
@@ -114,6 +115,12 @@ all. An agent modifying this code should treat them as load-bearing.
    is required. Conversions by already-scattered photons are outside the model;
    in the paper's patient studies those were 7.7% of GATE's vertices.
 
+6. **Internal pairs enter as a diagonal term.** `internal=alpha_pi` adds
+   `b * alpha_pi * f` to `forward()` and `b * alpha_pi * y` to `backward()`,
+   the pairs the nucleus creates at the decay site. The term is its own
+   transpose, so invariants 1 to 3 hold with it, and `Gamma' - Gamma` equals
+   `b * alpha_pi * I` to single-precision rounding.
+
 ## Checks worth running after any change
 
 ```python
@@ -125,12 +132,17 @@ assert abs(float((op.forward(f)*y).sum()) - float((f*op.backward(y)).sum())) \
 # linearity
 assert torch.allclose(op.forward(2*f), 2*op.forward(f), rtol=1e-4)
 
-# fixed matrix: same input, same output, bit for bit
-assert torch.equal(op.forward(f), op.forward(f))
+# fixed matrix: same input, same output, to single-precision rounding
+g = op.forward(f)
+assert float((op.forward(f) - g).abs().max()) < 1e-5 * float(g.abs().max())
 ```
 
-The adjoint residual is a single-precision accumulation floor and grows with
-photon count: bit-exact at 5e7, around 1e-5 relative at 3e9. A residual that
+The paths are the same at every application; only the order of the atomic
+accumulations in the kernel varies, so repeated applications differ by
+single-precision rounding (about 4e-7 of the maximum on an RTX 5090), not by
+Monte Carlo noise. The adjoint residual is a single-precision accumulation
+floor of the same kind and grows with photon count: around 1e-7 at 1e7
+photons, 1e-5 relative at 3e9. A residual that
 grows faster than that, or a uniform-map test that passes while a
 heterogeneous one fails, means invariant 2 or 3 has been broken.
 
@@ -149,7 +161,9 @@ heterogeneous one fails, means invariant 2 or 3 has been broken.
 assigns one of five tissue classes by threshold, and subdivides each class into
 density bins no wider than 0.05 g/cm3, giving 55 materials. Water values are
 XCOM at the true line energy, scaled between classes by `<Z/A>` for the total
-channel and `<Z^2/A>` for the pair channel, both from ICRP compositions.
+channel and `<Z^2/A>` for the pair channel, both from the elemental composition
+of each class: Geant4 NIST definitions, except adipose tissue, whose
+composition is that of ICRU Report 44 (Table 1 of the paper).
 
 The two scale differently because the processes do: between 1.5 and 3 MeV in
 low-Z tissue the total coefficient is dominated by Compton scattering and

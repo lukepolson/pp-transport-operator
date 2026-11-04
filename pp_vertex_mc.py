@@ -108,6 +108,22 @@ class MCPPVertexTransform(Transform):
         frozen: reuse the same seed at every application.  With stratified
             emission this makes the operator a genuine fixed matrix; there is no
             reason to turn it off except to reproduce the old behaviour.
+        positron: None scores the conversion vertex.  A dict with "table", an
+            (n, 2) array of positron displacements along and across the photon
+            direction in water (mm), "mu_ref", mu_tot of water at the line
+            (1/mm), and optionally "smax", scores the annihilation point
+            instead, so the operator maps activity to annihilation density.
+            The displacement is scaled by mu_ref / mu_tot at the vertex, capped
+            at smax. Every score draws its own displacement, which adds Monte
+            Carlo noise to the frozen matrix. A dict with "shift" (mm) in
+            place of "table" moves each score by that mean forward drift
+            instead, deterministically; the spread about the mean then belongs
+            in an image-space kernel after this operator (residual_kernel(),
+            KernelTransform).
+        internal: internal pairs per emitted photon, alpha_pi.  The nucleus
+            creates them where it decays, with no photon and no transport, so
+            they add b * alpha_pi * I to the operator: Gamma' = Gamma + b
+            alpha_pi I, in the forward and the adjoint alike.
 
     The operator is a fixed matrix as soon as setup() has run.  Nothing about it
     depends on the input except linearly, and its adjoint is the transpose of the
@@ -120,8 +136,11 @@ class MCPPVertexTransform(Transform):
                  raymarch: bool = False,
                  n_photons_sens: int | None = None,
                  seed: int = 0, frozen: bool = True,
+                 positron: dict | None = None, internal: float = 0.0,
                  threads: int = 128, blocks: int = 8192):
         super().__init__()
+        self.positron = positron
+        self.internal = float(internal)
         self.mu_tot_fine = torch.as_tensor(np.asarray(mu_tot), dtype=torch.float32)
         self.mu_pp_fine = torch.as_tensor(np.asarray(mu_pp), dtype=torch.float32)
         if self.mu_tot_fine.shape != self.mu_pp_fine.shape:
@@ -178,6 +197,11 @@ class MCPPVertexTransform(Transform):
         # A margin keeps mu_tot/mu_max strictly below 1 even if a resampled map
         # produces a value fractionally above the stored maximum.
         self.mu_max = float(self.mu_tot.max()) * 1.0001 * self.mu_max_scale
+        self.ptab = None
+        if self.positron is not None and "table" in self.positron:
+            self.ptab = torch.as_tensor(np.asarray(self.positron["table"]),
+                                        dtype=torch.float32,
+                                        device=self.device).contiguous()
 
     # ------------------------------------------------------------------
     @property
@@ -198,7 +222,10 @@ class MCPPVertexTransform(Transform):
             w0, self.mu2, self.shape, self.dr, self.mu_max,
             self.n_groups, self.ndir, transpose, seed,
             ndirs_total=self.K * self.ndir, yimg=yimg,
-            raymarch=self.raymarch,
+            raymarch=self.raymarch, ptab=self.ptab,
+            mu_ref=(self.positron or {}).get("mu_ref", 0.0),
+            smax=(self.positron or {}).get("smax", 5.0),
+            dshift=(self.positron or {}).get("shift", 0.0),
             max_steps=self.max_steps, threads=self.threads, blocks=self.blocks)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -211,8 +238,10 @@ class MCPPVertexTransform(Transform):
         # w = x_j / q_j with q = 1/nvox, carried in units of the mean so the
         # weights are O(1) and the atomicAdd accumulation keeps its precision.
         w0 = (flat * (self.nvox / tot)).contiguous()
-        out = self._run(w0, False)
-        return self.b * out * (tot / (self.n_groups * self.ndir))
+        out = self.b * self._run(w0, False) * (tot / (self.n_groups * self.ndir))
+        if self.internal:
+            out = out + (self.b * self.internal) * flat.reshape(out.shape).to(out.dtype)
+        return out
 
     def backward(self, x: torch.Tensor, norm_constant=None):
         """The exact transpose of what forward() realised.
@@ -228,4 +257,75 @@ class MCPPVertexTransform(Transform):
         else:
             out = self._run(None, True, yimg=(flat / m).contiguous())
             out = self.b * out * (m * self.nvox / (self.n_groups * self.ndir))
+        if self.internal:
+            out = out + (self.b * self.internal) * flat.reshape(out.shape).to(out.dtype)
+        return (out, norm_constant) if norm_constant is not None else out
+
+
+def residual_kernel(table, dr, half: int = 2, n: int = 4_000_000, seed: int = 0,
+                    jitter: bool = False):
+    """Voxel-to-voxel kernel of the positron spread about its mean forward drift.
+
+    table: (n, 2) displacements along and across the photon direction (mm).
+    The mean along-component is what MCPPVertexTransform(positron={"shift":
+    ...}) applies; this is the rest, (d_par - mean) along a random photon
+    direction plus d_perp across it at a random azimuth, from the voxel
+    centre. Averaging over photon directions makes it isotropic; it is
+    symmetrised so the transform is exactly self-adjoint. dr is (dx, dy, dz)
+    in mm; the kernel is indexed the same way.
+
+    Starting at the voxel centre rather than uniformly within the voxel
+    (jitter=True) is what reproduces the per-score sampling: for a 37 mm
+    sphere in water the shift plus this kernel keeps 0.890 of the vertex
+    density inside the sphere, as sampling does (GATE 0.884), where the
+    uniform start gives 0.866 by counting the voxel width twice.
+    """
+    rng = np.random.default_rng(seed)
+    t = np.asarray(table, dtype=np.float64)
+    pick = t[rng.integers(0, len(t), n)]
+    k = rng.normal(size=(n, 3)); k /= np.linalg.norm(k, axis=1, keepdims=True)
+    a = np.where(np.abs(k[:, 2:3]) < 0.9, [[0.0, 0.0, 1.0]], [[1.0, 0.0, 0.0]])
+    e1 = np.cross(a, k); e1 /= np.linalg.norm(e1, axis=1, keepdims=True)
+    e2 = np.cross(k, e1)
+    phi = rng.random(n) * 2 * np.pi
+    res = ((pick[:, 0] - t[:, 0].mean())[:, None] * k
+           + pick[:, 1][:, None] * (np.cos(phi)[:, None] * e1 + np.sin(phi)[:, None] * e2))
+    dr = np.asarray(dr, dtype=np.float64)
+    start = (rng.random((n, 3)) - 0.5) * dr if jitter else 0.0
+    idx = np.round((res + start) / dr).astype(int)
+    keep = np.all(np.abs(idx) <= half, axis=1)
+    ker = np.zeros((2 * half + 1,) * 3)
+    np.add.at(ker, tuple((idx[keep] + half).T), 1.0)
+    ker = 0.5 * (ker + ker[::-1, ::-1, ::-1])
+    return (ker / ker.sum()).astype(np.float32)
+
+
+class KernelTransform(Transform):
+    """Image-space convolution with a small point-symmetric kernel (the B of H).
+
+    Point symmetry makes the convolution its own transpose, so forward and
+    backward are the same operation.
+    """
+
+    def __init__(self, kernel):
+        super().__init__()
+        self.kernel_np = np.asarray(kernel, dtype=np.float32)
+        self.pad = tuple(s // 2 for s in self.kernel_np.shape)
+
+    def configure(self, object_meta, proj_meta=None) -> None:
+        super().configure(object_meta, proj_meta)
+        dev = (pytomography.device if _HAVE_PYTOMOGRAPHY
+               else ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.kernel = torch.as_tensor(self.kernel_np, device=dev)[None, None]
+
+    def _conv(self, x: torch.Tensor) -> torch.Tensor:
+        x5 = x.to(self.kernel.device).float().reshape(1, 1, *x.shape[-3:])
+        y = torch.nn.functional.conv3d(x5, self.kernel, padding=self.pad)
+        return y.reshape(x.shape)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self._conv(x)
+
+    def backward(self, x: torch.Tensor, norm_constant=None):
+        out = self._conv(x)
         return (out, norm_constant) if norm_constant is not None else out
