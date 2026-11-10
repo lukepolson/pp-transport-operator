@@ -17,8 +17,8 @@ images the distribution of *conversion sites*, not the activity. This operator
   Gamma f(r) = b * mu_pp(r) * INT exp(-tau(r,r')) / (4 pi |r-r'|^2) f(r') d3r'
 ```
 
-maps activity density to pair-production vertex density through the patient's
-own CT. Placed in the system matrix as `H = N A P B Gamma`, it lets listmode
+maps the activity distribution f to the distribution of photon-induced
+electron-positron pairs (EPPs) through the patient's own CT. Placed in the system matrix as `H = N A P B Gamma`, it lets listmode
 OSEM converge to the activity instead.
 
 The excited 208Pb nucleus can also create the pair itself, by internal pair
